@@ -1,28 +1,33 @@
-# NOT WORKING ON PYTHON 3.9.13 or newer!!!
+# TikTok Rare Username Checker
 
-# TikTok-Rare-Username-Checker
-## A simple basic tool that checks if a TikTok username is taken or not
+## Overview
+A simple tool to check the availability of TikTok usernames.
 
 ## About
-It is a proxyless tool that checks the availablity of TikTok usernames in blazing fast
-speed. It checks if the http request status code is not ```200```. If it is, it will automatically assume that the TikTok username is not taken. 
+This proxyless tool checks the availability of TikTok usernames at high speed. It determines availability based on the HTTP request status code. If the status code is not `200`, the tool assumes the username is available.
 
-This tool can be inaccurate at times because it does not use the TikTok api. It only checks if the username's TikTok url is invalid.
+**Note:** This tool can be inaccurate as it does not use the official TikTok API. It only checks if the username's TikTok URL is invalid.
 
-This tool is used for educational purposes only. 
+**Disclaimer:** This tool is for educational purposes only.
 
-## How to use
-- Python must be installed
+## Requirements
+- Python 3.7.6 (not compatible with Python 3.9.13 or newer)
 
-1. If you dont have python installed, download python 3.7.6
-and make sure you click on the 'ADD TO PATH' option during
-the installation.
+## Installation
+1. Download and install Python 3.7.6. Ensure you select the 'ADD TO PATH' option during installation.
+2. Install the required package by running:
+   ```sh
+   pip install aiohttp
+   ```
 
-2. Type ```pip install aiohttp``` in cmd
+## Usage
+1. Add the usernames you want to check in `usernames.txt`. To avoid rate limiting, it is recommended to check around 500 usernames and then wait 24 hours before checking again.
+2. Ensure you are in the same directory as the downloaded folder. Run the tool by typing:
+   ```sh
+   python main.py
+   ```
+3. Once the tool has finished running, available usernames will be saved in `hits.txt`.
 
-3.  Add the usernames you want to check in ```usernames.txt```. Do not put a lot of usernames because you can get rate limited (because this tool is proxyless). It is recommended to check around 500 usernames then wait 24 hours before you can check again.  
-
-4.  Make sure you are in the same directory as the folder you downloaded it in.  Type
-```python main.py``` in cmd to run
-
-5. Once it is done running, available usernames will be saved in ```hits.txt```. 
+## Limitations
+- This tool does not work with Python 3.9.13 or newer.
+- It is proxyless and may result in rate limiting if too many usernames are checked at once.
