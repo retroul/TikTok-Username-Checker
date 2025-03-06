@@ -1,1 +1,5 @@
-Put Here The Usernames You Want To Check
+# Add the TikTok usernames you want to check, one per line.
+# Example:
+# username1
+# username2
+# username3
