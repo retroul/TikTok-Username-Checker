@@ -42,7 +42,7 @@ and Linux** — the only thing you need is Python 3.8+, which most systems alrea
 have. No `pip install`, no virtualenv, no fighting with Python versions.
 
 ```sh
-git clone https://github.com/<you>/TikTok-Username-Checker.git
+git clone https://github.com/retroul/TikTok-Username-Checker.git
 cd TikTok-Username-Checker
 ```
 
