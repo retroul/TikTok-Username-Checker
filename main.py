@@ -510,7 +510,6 @@ class UsernameChecker:
                     for future in futures:
                         future.cancel()
                 # exiting the `with` waits for in-flight checks to finish
-            # collect results from futures that finished during shutdown
             for future in futures:
                 if future not in collected and not future.cancelled() and future.done():
                     result = future.result()
