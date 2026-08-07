@@ -1,5 +1,9 @@
 # Add the TikTok usernames you want to check, one per line.
-# Example:
-# username1
-# username2
-# username3
+# Lines starting with # are ignored. A leading @ is fine too.
+#
+# Rules: 2-24 characters, letters / digits / periods / underscores.
+#
+# Examples:
+# tiktok
+# mycoolname
+# mycoolname2
