@@ -37,12 +37,77 @@ the same public profile-page approach this tool uses.
 
 ## Installation
 
+The checker is pure Python (standard library only) and runs on **Windows, macOS
+and Linux** — the only thing you need is Python 3.8+, which most systems already
+have. No `pip install`, no virtualenv, no fighting with Python versions.
+
 ```sh
 git clone https://github.com/<you>/TikTok-Username-Checker.git
 cd TikTok-Username-Checker
 ```
 
-That's it. No `pip install`, no virtualenv, no fighting with Python versions.
+### Windows
+
+1. **Check if Python is installed** — open a terminal (press `Win + R`, type
+   `cmd`, press Enter) and run:
+
+   ```bat
+   python --version
+   ```
+
+   (if that fails, try `py --version`)
+
+2. **Install Python if missing** — download it from
+   <https://www.python.org/downloads/> and run the installer. ⚠️ **Important:
+   tick "Add Python to PATH"** on the first screen of the installer.
+   Alternatively, from a terminal: `winget install Python.Python.3.12`
+
+3. **Go to the project folder**:
+
+   ```bat
+   cd Documents\GitHub\TikTok-Username-Checker
+   ```
+
+4. **Run it**:
+
+   ```bat
+   python main.py
+   ```
+
+   (or `py main.py`)
+
+   Edit `usernames.txt` with Notepad (right-click → Open with → Notepad).
+   Colours work out of the box on Windows 10+ (the tool enables ANSI support
+   automatically).
+
+### macOS
+
+1. **Check if Python is installed** — open Terminal and run:
+
+   ```sh
+   python3 --version
+   ```
+
+2. **Install Python if missing** — easiest via Homebrew:
+
+   ```sh
+   brew install python
+   ```
+
+   (No Homebrew? Install it from <https://brew.sh> first, or use the installer
+   from <https://www.python.org/downloads/>)
+
+3. **Go to the project folder**:
+
+   ```sh
+   cd ~/Documents/GitHub/TikTok-Username-Checker
+   ```
+
+4. **Run it**:
+
+   ```sh
+   python3 main.py
+   ```
 
 ### Linux
 
@@ -55,22 +120,34 @@ python3 --version
 If it's missing, install it with your package manager:
 
 ```sh
-# Debian / Ubuntu / Mint
+# Debian / Ubuntu / Linux Mint
 sudo apt install python3
 
-# Fedora / RHEL
+# Fedora / RHEL / CentOS
 sudo dnf install python3
 
-# Arch
+# Arch / Manjaro
 sudo pacman -S python
+
+# openSUSE
+sudo zypper install python3
+
+# Alpine
+sudo apk add python3
 ```
 
-Then just run it from the project folder:
+Then run from the project folder:
 
 ```sh
 cd ~/Documents/GitHub/TikTok-Username-Checker
 python3 main.py
 ```
+
+### Any other system
+
+If `python3 --version` (or `python --version`) reports **3.8 or newer**, the tool
+works as-is: `python3 main.py` or `python main.py`. If your terminal ever shows
+strange `←[32m`-style characters, run with `--no-color`.
 
 ## Usage
 
@@ -87,6 +164,9 @@ python3 main.py
    ```sh
    python main.py
    ```
+
+   (the same command works on Windows, macOS and Linux; on Windows you can also
+   use `py main.py`)
 
 3. When it finishes, every **available** username is saved to `hits.txt`
    (already-known hits are never duplicated).

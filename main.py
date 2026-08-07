@@ -48,6 +48,7 @@ import argparse
 import csv
 import html
 import json
+import os
 import random
 import re
 import sys
@@ -61,7 +62,7 @@ from pathlib import Path
 from threading import Event, Lock
 from typing import Dict, List, Optional, Tuple
 
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 
 HOME_URL = "https://www.tiktok.com"
 
@@ -780,6 +781,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[List[str]] = None) -> None:
     global USE_COLOR
     args = parse_args(argv)
+
+    if os.name == "nt":
+        os.system("")  # enable ANSI colour support in the Windows console
 
     if args.no_color or not sys.stdout.isatty():
         USE_COLOR = False
