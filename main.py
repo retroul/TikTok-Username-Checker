@@ -35,7 +35,8 @@ Requirements
 
 Usage
 -----
-    python main.py                        # check usernames.txt, save to hits.txt
+    python main.py                        # type usernames at a prompt (or check usernames.txt)
+    python main.py coolname cool.name     # check names straight away
     python main.py -f usernames.txt --json results.json --csv results.csv
     python main.py --proxies proxies.txt --max-retries 3
 
@@ -62,9 +63,10 @@ from pathlib import Path
 from threading import Event, Lock
 from typing import Dict, List, Optional, Tuple
 
-VERSION = "2.1.1"
+VERSION = "2.4.0"
 
 HOME_URL = "https://www.tiktok.com"
+DEFAULT_NAMES_FILE = Path("usernames.txt")
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -77,7 +79,20 @@ USER_AGENTS = [
 TIKTOK_NOT_FOUND_CODES = {10202, 10221, 10222, 10223, 10224}
 
 # Usernames: 2-24 chars, letters / digits / . / _
-USERNAME_RE = re.compile(r"^[A-Za-z0-9._]{2,24}$")
+USERNAME_CHARS_RE = re.compile(r"^[A-Za-z0-9._]+$")
+
+
+def username_problem(name: str) -> Optional[str]:
+    """Return why TikTok would reject this username, or None if it is valid."""
+    if len(name) < 2:
+        return "too short (min 2 characters)"
+    if len(name) > 24:
+        return "too long (max 24 characters)"
+    if not USERNAME_CHARS_RE.fullmatch(name):
+        return "only letters, numbers, periods and underscores are allowed"
+    if name.endswith("."):
+        return "can't end with a period"
+    return None
 
 REHYDRATION_RE = re.compile(
     r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>', re.S
@@ -100,12 +115,12 @@ class Palette:
 
 
 BANNER = r"""
-  _______ _ _ _______    _       _____                           _             
- |__   __(_) |__   __|  | |     / ____|                         | |            
-    | |   _| | _| | ___ | | __ | |  __  ___ _ __   ___ _ __ __ _| |_ ___  _ __ 
-    | |  | | |/ / |/ _ \| |/ / | | |_ |/ _ \ '_ \ / _ \ '__/ _` | __/ _ \| '__|
-    | |  | |   <| | (_) |   <  | |__| |  __/ | | |  __/ | | (_| | || (_) | |   
-    |_|  |_|_|\_\_|\___/|_|\_\  \_____|\___|_| |_|\___|_|  \__,_|\__\___/|_|
+  _______ _ _ _______    _        _____  _                  _
+ |__   __(_) |__   __|  | |      / ____|| |                | |
+    | |   _| | _| | ___ | | __  | |     | |__    ___   ___ | | __  ___  _ __
+    | |  | | |/ / |/ _ \| |/ /  | |     | '_ \  / _ \ / __|| |/ / / _ \| '__|
+    | |  | |   <| | (_) |   <   | |____ | | | ||  __/| (__ |   < |  __/| |
+    |_|  |_|_|\_\_|\___/|_|\_\   \_____||_| |_| \___| \___||_|\_\ \___||_|
 """
 
 
@@ -126,13 +141,14 @@ class CheckResult:
         return f"{HOME_URL}/@{self.username}"
 
     def to_line(self) -> str:
+        width = len("[AVAILABLE]")  # pad labels so the URLs line up
         if self.status == "available":
             label = paint("[AVAILABLE]", Palette.GREEN)
-            extra = " — looks free, go grab it"
+            extra = " — free right now, go grab it"
             if self.double_checked and not self.confirmed:
                 extra += paint(" (unconfirmed)", Palette.GRAY)
         elif self.status == "taken":
-            label = paint("[TAKEN]", Palette.RED)
+            label = paint("[TAKEN]".ljust(width), Palette.RED)
             extra = ""
             if self.nickname:
                 extra = f" — {self.nickname}"
@@ -143,10 +159,10 @@ class CheckResult:
             if self.error == "corrected by double-check":
                 extra += paint(" [corrected]", Palette.GRAY)
         elif self.status == "blocked":
-            label = paint("[BLOCKED]", Palette.YELLOW)
+            label = paint("[BLOCKED]".ljust(width), Palette.YELLOW)
             extra = f" — {self.error or 'rate limited / captcha'}"
         else:
-            label = paint("[ERROR]", Palette.YELLOW)
+            label = paint("[ERROR]".ljust(width), Palette.YELLOW)
             extra = f" — {self.error}"
         return f"{label} {self.url}{extra}"
 
@@ -160,6 +176,13 @@ def format_count(n: int) -> str:
     if n >= 1_000:
         return f"{n / 1_000:.1f}K"
     return str(n)
+
+
+def count_statuses(results: List[CheckResult]) -> Dict[str, int]:
+    stats = {"available": 0, "taken": 0, "blocked": 0, "error": 0}
+    for result in results:
+        stats[result.status] = stats.get(result.status, 0) + 1
+    return stats
 
 
 def _result_dict(r: CheckResult) -> Dict[str, object]:
@@ -470,11 +493,20 @@ class UsernameChecker:
         self._report_outcome("blocked")
         return CheckResult(username, "blocked", error=last_error or "rate limited")
 
-    def run(self, usernames: List[str]) -> List[CheckResult]:
-        """Check a list of usernames concurrently, printing as they finish."""
+    @staticmethod
+    def _print_progress(result: CheckResult, done: int, total: int) -> None:
+        if total == 1:
+            print(result.to_line())
+            return
+        counter = f"{done:>{len(str(total))}}/{total}"
+        print(f"{paint(counter, Palette.GRAY)} {result.to_line()}")
+
+    def run(self, usernames: List[str], announce: bool = True, show_each: bool = True) -> List[CheckResult]:
+        """Check a list of usernames concurrently, printing as they finish
+        (announce = print the "Checking N..." header, show_each = print every result)."""
         start = time.monotonic()
         results: List[CheckResult] = []
-        if self.verbose:
+        if self.verbose and announce:
             print(
                 paint(
                     f"Checking {len(usernames)} username(s) "
@@ -502,8 +534,8 @@ class UsernameChecker:
                         collected.add(future)
                         result = future.result()
                         results.append(result)
-                        if self.verbose:
-                            print(result.to_line())
+                        if self.verbose and show_each:
+                            self._print_progress(result, len(results), len(usernames))
                 except KeyboardInterrupt:
                     print("\n" + paint("Interrupted — finishing and saving results...", Palette.YELLOW))
                     self.stop_event.set()
@@ -514,17 +546,15 @@ class UsernameChecker:
                 if future not in collected and not future.cancelled() and future.done():
                     result = future.result()
                     results.append(result)
-                    if self.verbose:
-                        print(result.to_line())
+                    if self.verbose and show_each:
+                        self._print_progress(result, len(results), len(usernames))
         except KeyboardInterrupt:
             # Ctrl+C pressed again while shutting down
             print("\n" + paint("Stopped.", Palette.YELLOW))
             self.stop_event.set()
 
         self.elapsed = time.monotonic() - start
-        self.stats = {"available": 0, "taken": 0, "blocked": 0, "error": 0}
-        for result in results:
-            self.stats[result.status] = self.stats.get(result.status, 0) + 1
+        self.stats = count_statuses(results)
         return results
 
     def retry_blocked(self, results: List[CheckResult]) -> List[CheckResult]:
@@ -554,34 +584,45 @@ class UsernameChecker:
         fresh = {r.username: r for r in retry_checker.run(blocked)}
         self.elapsed += retry_checker.elapsed
         merged = [fresh.get(r.username, r) for r in results]
-        self.stats = {"available": 0, "taken": 0, "blocked": 0, "error": 0}
-        for result in merged:
-            self.stats[result.status] = self.stats.get(result.status, 0) + 1
+        self.stats = count_statuses(merged)
         return merged
 
 
-def load_usernames(path: Path) -> Tuple[List[str], List[str]]:
-    """Load usernames from a file. Returns (valid, invalid)."""
+def clean_names(raw_names: List[str]) -> Tuple[List[str], List[Tuple[str, str]]]:
+    """Normalise and validate names. Returns (valid, [(invalid, reason), ...]).
+
+    TikTok usernames are case-insensitive, so duplicates are dropped ignoring case.
+    """
+    seen: set = set()
+    valid: List[str] = []
+    invalid: List[Tuple[str, str]] = []
+    for raw in raw_names:
+        username = raw.strip().lstrip("@").strip()
+        if not username or username.lower() in seen:
+            continue
+        seen.add(username.lower())
+        problem = username_problem(username)
+        if problem:
+            invalid.append((username, problem))
+        else:
+            valid.append(username)
+    return valid, invalid
+
+
+def read_names_file(path: Path) -> Optional[List[str]]:
+    """Return the non-comment lines of a usernames file, or None if it doesn't exist."""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
-        print(paint(f"Error: {path} not found!", Palette.RED))
-        sys.exit(1)
+        return None
+    return [ln for ln in lines if ln.strip() and not ln.strip().startswith("#")]
 
-    seen: set = set()
-    valid, invalid = [], []
-    for raw in lines:
-        username = raw.strip().lstrip("@").strip()
-        if not username or username.startswith("#"):
-            continue
-        if username in seen:
-            continue
-        seen.add(username)
-        if USERNAME_RE.fullmatch(username):
-            valid.append(username)
-        else:
-            invalid.append(username)
-    return valid, invalid
+
+def warn_invalid(invalid: List[Tuple[str, str]]) -> None:
+    for name, reason in invalid[:10]:
+        print(paint(f"Skipped '{name}': {reason}", Palette.YELLOW))
+    if len(invalid) > 10:
+        print(paint(f"...and {len(invalid) - 10} more invalid username(s)", Palette.YELLOW))
 
 
 def load_existing_hits(path: Path) -> set:
@@ -594,13 +635,15 @@ def load_existing_hits(path: Path) -> set:
 
 
 def save_hits(path: Path, results: List[CheckResult], existing: set) -> int:
-    """Append newly found available usernames. Returns number written."""
+    """Append newly found available usernames (and add them to `existing`).
+    Returns number written."""
     new = [r.username for r in results if r.status == "available" and r.username not in existing]
     if not new:
         return 0
     with path.open("a", encoding="utf-8") as f:
         for username in new:
             f.write(f"{username}\n")
+    existing.update(new)
     return len(new)
 
 
@@ -637,9 +680,7 @@ _STATUS_COLORS = {
 def export_html(path: Path, results: List[CheckResult], checked_at: str) -> None:
     """Write a self-contained, styled HTML report of all results."""
     total = len(results) or 1
-    stats = {"available": 0, "taken": 0, "blocked": 0, "error": 0}
-    for r in results:
-        stats[r.status] = stats.get(r.status, 0) + 1
+    stats = count_statuses(results)
 
     bars = []
     for label, key, color in (
@@ -734,13 +775,24 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         prog="main.py",
         description="Real TikTok username availability checker (standard library only).",
         epilog="Examples:\n"
-        "  python main.py\n"
-        "  python main.py -f usernames.txt --json results.json --csv results.csv\n"
-        "  python main.py --proxies proxies.txt --max-retries 5\n",
+        "  python3 main.py                      # type usernames and check them live\n"
+        "  python3 main.py coolname cool.name   # check names straight away\n"
+        "  python3 main.py -f usernames.txt --html report.html\n"
+        "  python3 main.py --proxies proxies.txt --max-retries 5\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("-f", "--file", type=Path, default=Path("usernames.txt"),
-                        help="file with usernames, one per line (default: usernames.txt)")
+    parser.add_argument("usernames", nargs="*",
+                        help="usernames to check (skips the file and the prompt)")
+    parser.add_argument("-i", "--interactive", action="store_true",
+                        help="type usernames one after another, even if usernames.txt has names")
+    parser.add_argument("--suggest", action="store_true",
+                        help="when a name is taken, check ~10 similar names and show the free ones (off by default)")
+    parser.add_argument("--watch", action="store_true",
+                        help="keep re-checking taken names and alert you when one becomes free (off by default)")
+    parser.add_argument("--every", type=float, default=30.0, metavar="MINUTES",
+                        help="with --watch: minutes between checks (default: 30, minimum: 1)")
+    parser.add_argument("-f", "--file", type=Path, default=None,
+                        help=f"file with usernames, one per line (default: {DEFAULT_NAMES_FILE})")
     parser.add_argument("-o", "--output", type=Path, default=Path("hits.txt"),
                         help="file to save available usernames to (default: hits.txt)")
     parser.add_argument("--json", type=Path, default=None, dest="json_out",
@@ -777,12 +829,181 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def split_names(text: str) -> List[str]:
+    """Split user input like 'name1, name2 @name3' into separate names."""
+    return [part for part in re.split(r"[\s,]+", text) if part]
+
+
+SUGGEST_PREFIXES = ["its.", "the", "im.", "real", "hey."]
+SUGGEST_SUFFIXES = [".tv", "_", "hq", "official", ".x", "tok", "_xo", ".fyp"]
+SUGGEST_LIMIT = 10
+
+
+def make_suggestions(name: str) -> List[str]:
+    """Similar usernames to try when `name` is taken (valid ones only, max SUGGEST_LIMIT)."""
+    base = name.lower()
+    candidates = []
+    # alternate suffix/prefix so a short limit still gives a mix of both
+    for i in range(max(len(SUGGEST_PREFIXES), len(SUGGEST_SUFFIXES))):
+        if i < len(SUGGEST_SUFFIXES):
+            candidates.append(base + SUGGEST_SUFFIXES[i])
+        if i < len(SUGGEST_PREFIXES):
+            candidates.append(SUGGEST_PREFIXES[i] + base)
+    valid, _ = clean_names(candidates)
+    return [c for c in valid if c != base][:SUGGEST_LIMIT]
+
+
+def suggest_for_taken(checker: UsernameChecker, batch: List[CheckResult]) -> List[CheckResult]:
+    """For every taken name in `batch`, check similar names and print the free ones."""
+    found: List[CheckResult] = []
+    for result in batch:
+        if result.status != "taken" or checker.stop_event.is_set():
+            continue
+        options = make_suggestions(result.username)
+        if not options:
+            continue
+        print(paint(f"  Checking {len(options)} names similar to @{result.username}...", Palette.GRAY))
+        checked = checker.run(options, announce=False, show_each=False)
+        free = [r.username for r in checked if r.status == "available"]
+        if free:
+            print(f"  {paint('Free:', Palette.GREEN)} {', '.join(free)}")
+        else:
+            print(paint("  No free similar names found.", Palette.GRAY))
+        found.extend(checked)
+    return found
+
+
+def interactive_session(checker: UsernameChecker, output: Path, hits: set, suggest: bool) -> Tuple[List[CheckResult], float]:
+    """Prompt for usernames until the user quits. Hits are saved after every check."""
+    try:
+        import readline  # noqa: F401  (arrow keys + history in input() where available)
+    except ImportError:
+        pass
+
+    print(paint("Type a username and press Enter. Several at once work too: name1 name2, name3", Palette.GRAY))
+    print(paint("Free ones are saved to " + str(output) + ". Type q (or press Ctrl+D) to finish.", Palette.GRAY))
+    print(paint(f"Name suggestions are {'on' if suggest else 'off'} — type 'suggest on' or 'suggest off' to switch.", Palette.GRAY))
+    print()
+
+    results: List[CheckResult] = []
+    elapsed = 0.0
+    while True:
+        try:
+            line = input(paint("username › ", Palette.CYAN))
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        command = " ".join(line.lower().split())
+        if command in ("q", "quit", "exit"):
+            break
+        if command in ("suggest on", "suggest off"):
+            suggest = command == "suggest on"
+            print(paint(f"Name suggestions {'on' if suggest else 'off'}.", Palette.GRAY))
+            print()
+            continue
+        valid, invalid = clean_names(split_names(line))
+        warn_invalid(invalid)
+        if not valid:
+            continue
+        checker.stop_event.clear()  # a Ctrl+C during the last check must not stop this one
+        batch = checker.run(valid, announce=False)
+        elapsed += checker.elapsed
+        if suggest:
+            start = time.monotonic()
+            batch += suggest_for_taken(checker, batch)
+            elapsed += time.monotonic() - start
+        save_hits(output, batch, hits)
+        results.extend(batch)
+        print()
+    return results, elapsed
+
+
+def watch_names(checker: UsernameChecker, names: List[str], every_minutes: float,
+                output: Path, hits: set) -> None:
+    """Re-check `names` every `every_minutes` until each one is free (or Ctrl+C)."""
+    remaining = list(names)
+    print(paint(f"Watching {len(remaining)} name(s), checking every {every_minutes:g} minute(s). "
+                "Leave this window open; press Ctrl+C to stop.", Palette.BOLD))
+    round_no = 0
+    while remaining:
+        round_no += 1
+        print()
+        print(paint(f"[{datetime.now():%H:%M:%S}] Check #{round_no}: {len(remaining)} name(s)", Palette.GRAY))
+        checker.stop_event.clear()
+        batch = checker.run(remaining, announce=False)
+        if checker.stop_event.is_set():  # Ctrl+C during the check
+            break
+        freed = [r for r in batch if r.status == "available"]
+        for result in freed:
+            remaining.remove(result.username)
+            # \a rings the terminal bell so you notice even if the window is in the background
+            print("\a" + paint(f">>> @{result.username} is FREE now! Grab it: {result.url}", Palette.GREEN))
+        save_hits(output, freed, hits)
+        if not remaining:
+            break
+        next_at = datetime.now().timestamp() + every_minutes * 60
+        print(paint(f"Next check at {datetime.fromtimestamp(next_at):%H:%M}.", Palette.GRAY))
+        try:
+            time.sleep(every_minutes * 60)
+        except KeyboardInterrupt:
+            print()
+            break
+
+    print()
+    freed_count = len(names) - len(remaining)
+    print(paint(f"Watch ended. Freed: {freed_count}. Still taken or unknown: {len(remaining)}"
+                + (f" ({', '.join(remaining)})" if remaining else ""), Palette.BOLD))
+    if freed_count:
+        print(paint(f"Free names were saved to {output}.", Palette.GRAY))
+
+
+def print_summary(args: argparse.Namespace, results: List[CheckResult], elapsed: float, written: int, known: int) -> None:
+    stats = count_statuses(results)
+    total = len(results)
+    speed = total / elapsed * 60 if elapsed > 0 else 0.0
+
+    def row(label: str, value: str, color: str = Palette.BOLD) -> None:
+        print(f"  {paint(label.ljust(13), color)} : {value}")
+
+    def count(key: str) -> str:
+        return f"{stats[key]} ({100 * stats[key] / total:.0f}%)" if total else "0"
+
+    print()
+    print(paint("=" * 60, Palette.BOLD))
+    print(paint("Summary", Palette.BOLD))
+    row("Total checked", str(total))
+    row("Time", f"{elapsed:.1f}s ({speed:.0f} usernames/min)")
+    row("Available", count("available"), Palette.GREEN)
+    row("Taken", count("taken"), Palette.RED)
+    row("Blocked", count("blocked"), Palette.YELLOW)
+    row("Errors", count("error"), Palette.YELLOW)
+    row("Saved hits", f"{written} new in {args.output}" + (f" ({known} already there)" if known else ""))
+    if args.json_out:
+        row("JSON export", str(args.json_out))
+    if args.csv_out:
+        row("CSV export", str(args.csv_out))
+    if args.html_out:
+        row("HTML report", str(args.html_out))
+    if stats["available"]:
+        print(paint("  Note: available = no account uses it right now. TikTok can still refuse\n"
+                    "  a name that belonged to a banned account or is reserved.", Palette.GRAY))
+    if stats["blocked"] or stats["error"]:
+        print(paint("  Tip: if you see many BLOCKED, raise --delay and lower --threads, "
+                    "or add --proxies. TikTok rate-limits aggressively.", Palette.GRAY))
+    print(paint("=" * 60, Palette.BOLD))
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     global USE_COLOR
     args = parse_args(argv)
 
     if os.name == "nt":
         os.system("")  # enable ANSI colour support in the Windows console
+    for stream in (sys.stdout, sys.stderr):
+        try:  # e.g. an old Windows console can't print ✓ or emoji in nicknames
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
     if args.no_color or not sys.stdout.isatty():
         USE_COLOR = False
@@ -806,21 +1027,36 @@ def main(argv: Optional[List[str]] = None) -> None:
         if not proxies:
             print(paint(f"Warning: {args.proxies} is empty — running without proxies.", Palette.YELLOW))
 
-    valid, invalid = load_usernames(args.file)
+    # Where the names come from: command line > -i prompt > file > prompt (if nothing in the file)
+    raw_names: List[str] = []
+    if args.usernames:
+        raw_names = [n for arg in args.usernames for n in split_names(arg)]
+    elif not args.interactive:
+        names_file = args.file or DEFAULT_NAMES_FILE
+        file_names = read_names_file(names_file)
+        if file_names is None and args.file:
+            print(paint(f"Error: {args.file} not found!", Palette.RED))
+            sys.exit(1)
+        raw_names = file_names or []
 
-    if not valid:
-        print(paint(f"No valid usernames found in {args.file}.", Palette.RED))
+    if args.watch and not raw_names:
+        print(paint("--watch needs names: python3 main.py --watch name1 name2 "
+                    "(or put them in usernames.txt).", Palette.RED))
         sys.exit(1)
 
-    if invalid:
-        print(
-            paint(
-                f"Warning: skipped {len(invalid)} invalid username(s) "
-                f"(2-24 chars, letters/digits/./_ only): {', '.join(invalid[:5])}"
-                + (" ..." if len(invalid) > 5 else ""),
-                Palette.YELLOW,
-            )
-        )
+    interactive = not raw_names
+    if interactive and not sys.stdin.isatty():
+        print(paint("No usernames given. Pass them as arguments or put them in "
+                    f"{args.file or DEFAULT_NAMES_FILE}.", Palette.RED))
+        sys.exit(1)
+
+    valid: List[str] = []
+    if not interactive:
+        valid, invalid = clean_names(raw_names)
+        warn_invalid(invalid)
+        if not valid:
+            print(paint("No valid usernames to check.", Palette.RED))
+            sys.exit(1)
 
     checker = UsernameChecker(
         threads=args.threads,
@@ -831,17 +1067,31 @@ def main(argv: Optional[List[str]] = None) -> None:
         proxy_max_failures=args.proxy_max_failures,
         double_check=not args.no_double_check,
         auto_slowdown=not args.no_auto_slowdown,
-        verbose=not args.quiet,
+        verbose=not args.quiet or interactive,
     )
 
     if proxies and not args.no_proxy_check:
         checker.probe_proxies()
 
-    existing_hits = load_existing_hits(args.output)
-    results = checker.run(valid)
-    if args.retry_blocked:
-        results = checker.retry_blocked(results)
-    written = save_hits(args.output, results, existing_hits)
+    hits = load_existing_hits(args.output)
+    known = len(hits)
+    if args.watch:
+        watch_names(checker, valid, max(args.every, 1.0), args.output, hits)
+        return
+    if interactive:
+        results, elapsed = interactive_session(checker, args.output, hits, args.suggest)
+        if not results:
+            print(paint("Nothing checked. Bye!", Palette.GRAY))
+            return
+    else:
+        start = time.monotonic()
+        results = checker.run(valid)
+        if args.retry_blocked:
+            results = checker.retry_blocked(results)
+        if args.suggest and not args.quiet:
+            results += suggest_for_taken(checker, results)
+        elapsed = time.monotonic() - start
+        save_hits(args.output, results, hits)
 
     checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
     if args.json_out:
@@ -851,39 +1101,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.html_out:
         export_html(args.html_out, results, checked_at)
 
-    total = len(results)
-    elapsed = checker.elapsed
-    speed = total / elapsed * 60 if elapsed > 0 else 0.0
-
-    def pct(count: int) -> str:
-        return f"{100 * count / total:.0f}%" if total else "0%"
-
-    print()
-    print(paint("=" * 60, Palette.BOLD))
-    print(paint("Summary", Palette.BOLD))
-    print(f"  Total checked : {total}")
-    print(f"  Time          : {elapsed:.1f}s ({speed:.0f} usernames/min)")
-    print(f"  {paint('Available', Palette.GREEN)}     : {checker.stats['available']} ({pct(checker.stats['available'])})")
-    print(f"  {paint('Taken', Palette.RED)}        : {checker.stats['taken']} ({pct(checker.stats['taken'])})")
-    print(f"  {paint('Blocked', Palette.YELLOW)}     : {checker.stats['blocked']} ({pct(checker.stats['blocked'])})")
-    print(f"  {paint('Errors', Palette.YELLOW)}      : {checker.stats['error']} ({pct(checker.stats['error'])})")
-    print(f"  Saved to {args.output}: {written} new hit(s)"
-          + (f" ({len(existing_hits)} already known)" if existing_hits else ""))
-    if args.json_out:
-        print(f"  JSON export   : {args.json_out}")
-    if args.csv_out:
-        print(f"  CSV export    : {args.csv_out}")
-    if args.html_out:
-        print(f"  HTML report   : {args.html_out}")
-    if checker.stats["blocked"] or checker.stats["error"]:
-        print(
-            paint(
-                "  Tip: if you see many BLOCKED, raise --delay and lower --threads, "
-                "or add --proxies. TikTok rate-limits aggressively.",
-                Palette.GRAY,
-            )
-        )
-    print(paint("=" * 60, Palette.BOLD))
+    print_summary(args, results, elapsed, len(hits) - known, known)
 
 
 if __name__ == "__main__":

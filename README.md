@@ -1,5 +1,8 @@
 # TikTok Username Checker
 
+> **v2.4** — type-and-check prompt, optional name suggestions (`--suggest`) and
+> optional watch mode (`--watch`) that alerts you when a taken name becomes free.
+>
 > **v2 — rebuilt.** The old version (checking the page's HTTP status code) stopped
 > working long ago because TikTok returns `200` for *every* username, taken or not.
 > This rewrite actually works.
@@ -151,25 +154,101 @@ strange `←[32m`-style characters, run with `--no-color`.
 
 ## Usage
 
-1. Add the usernames you want to check to `usernames.txt`, one per line:
+There are three ways to give it usernames:
 
-   ```
-   tiktok
-   mycoolname
-   mycoolname2
-   ```
+**1. Type them live (easiest).** Just run it and type names as they come to mind:
 
-2. Run it:
+```sh
+python3 main.py
+```
 
-   ```sh
-   python main.py
-   ```
+```
+username › coolname
+[TAKEN]     https://www.tiktok.com/@coolname — Cool Name · 12.4K followers
 
-   (the same command works on Windows, macOS and Linux; on Windows you can also
-   use `py main.py`)
+username › coolname.tv, its.coolname
+1/2 [AVAILABLE] https://www.tiktok.com/@its.coolname — free right now, go grab it
+2/2 [TAKEN]     https://www.tiktok.com/@coolname.tv — ...
 
-3. When it finishes, every **available** username is saved to `hits.txt`
-   (already-known hits are never duplicated).
+username › q
+```
+
+Type several at once separated by spaces or commas. Type `q` (or press
+`Ctrl+D`) to finish and see the summary. Free names are saved to `hits.txt`
+as you go.
+
+**2. Straight from the command line:**
+
+```sh
+python3 main.py coolname its.coolname coolname.tv
+```
+
+**3. A whole list from a file.** Put one username per line in `usernames.txt`
+and run `python3 main.py`. (If the file has names in it, they're checked
+instead of showing the prompt. Use `-i` to get the prompt anyway.)
+
+### Name suggestions (off by default)
+
+When you turn this on and a name is taken, the checker tries about 10 similar
+names (`its.name`, `name.tv`, `thename`, `name_`, `nameofficial`, ...) and
+shows the free ones:
+
+```
+username › coolname
+[TAKEN]     https://www.tiktok.com/@coolname — Cool Name · 12.4K followers
+  Checking 10 names similar to @coolname...
+  Free: its.coolname, coolname.tv
+```
+
+It's **off unless you turn it on**, because each taken name costs about 10
+extra checks (slower, and TikTok blocks you sooner). To use it:
+
+- Add `--suggest` when you start it: `python3 main.py --suggest`
+  (works with the prompt, names on the command line, or a file)
+- Or switch it while in the prompt: type `suggest on` / `suggest off`
+
+Free suggested names are saved to `hits.txt` too.
+
+### Watch a taken name (off by default)
+
+Accounts get deleted or renamed, and their username becomes free again.
+Watch mode keeps checking names you want and alerts you (a message plus a
+terminal beep) the moment one becomes free:
+
+```sh
+python3 main.py --watch coolname othername              # check every 30 minutes
+python3 main.py --watch coolname --every 10             # check every 10 minutes
+python3 main.py --watch -f usernames.txt --every 60     # watch a whole list hourly
+```
+
+```
+Watching 2 name(s), checking every 30 minute(s). Leave this window open; press Ctrl+C to stop.
+
+[14:00:02] Check #1: 2 name(s)
+[TAKEN]     https://www.tiktok.com/@coolname — Cool Name · 12.4K followers
+[TAKEN]     https://www.tiktok.com/@othername — Other · 803 followers
+Next check at 14:30.
+...
+[16:30:05] Check #6: 2 name(s)
+>>> @coolname is FREE now! Grab it: https://www.tiktok.com/@coolname
+```
+
+- It only runs while the window is open; closing it or pressing `Ctrl+C`
+  stops it and shows which names were freed.
+- A freed name is saved to `hits.txt` and no longer watched; it stops on
+  its own once every name is free.
+- The minimum interval is 1 minute. Checking more often doesn't help and
+  gets you rate-limited, so 15–60 minutes is a good range.
+
+Invalid names are skipped with the reason (too short/long, characters TikTok
+doesn't allow, ending with a period). A leading `@` is fine, and duplicates
+are ignored regardless of upper/lower case.
+
+On Windows use `python` or `py` instead of `python3`.
+
+> **What "available" means:** no TikTok account uses that name right now.
+> TikTok can still refuse a name when you try to claim it if it belonged to a
+> banned account or is reserved, so the only 100% test is trying it in the app.
 
 ### Options
 
@@ -185,6 +264,11 @@ python main.py --no-color       # plain output (e.g. for piping to a file)
 
 | Flag            | Default | What it does                                    |
 | --------------- | ------- | ----------------------------------------------- |
+| `usernames...`  | — | usernames to check right away (skips the file and the prompt) |
+| `-i, --interactive` | — | type usernames at a prompt, even if `usernames.txt` has names |
+| `--suggest`     | off | check ~10 similar names when a name is taken |
+| `--watch`       | off | keep re-checking the names and alert when one becomes free |
+| `--every`       | `30` | with `--watch`: minutes between checks (minimum 1) |
 | `-f, --file`    | `usernames.txt` | input file, one username per line (lines starting with `#` are ignored) |
 | `-o, --output`  | `hits.txt` | where available usernames are saved |
 | `--json`        | — | export **all** results (with details) to a JSON file |
