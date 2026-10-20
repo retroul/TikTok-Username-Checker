@@ -96,6 +96,24 @@ def username_problem(name: str) -> Optional[str]:
         return "can't end with a period"
     return None
 
+
+def clean_text(value: object) -> str:
+    """Text from TikTok pages, safe to print: control / escape characters become spaces."""
+    return "".join(ch if ch.isprintable() else " " for ch in str(value))
+
+
+def to_int(value: object) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def mask_proxy(proxy: str) -> str:
+    """Hide the password part of a proxy address before printing it."""
+    return re.sub(r"^((?:[a-z0-9+.-]+://)?)[^/]+@", r"\1***@", proxy, flags=re.I)
+
+
 REHYDRATION_RE = re.compile(
     r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>', re.S
 )
@@ -248,7 +266,7 @@ class ProxyPool:
                 self.removed.append(proxy)
                 evicted = True
         if evicted and verbose:
-            print(paint(f"  [proxy evicted] {proxy}", Palette.YELLOW))
+            print(paint(f"  [proxy evicted] {mask_proxy(proxy)}", Palette.YELLOW))
         return evicted
 
 
@@ -353,7 +371,7 @@ class UsernameChecker:
         if self._proxy_pool.removed:
             print(
                 paint(
-                    f"Removed dead proxy(ies): {', '.join(self._proxy_pool.removed)}",
+                    f"Removed dead proxy(ies): {', '.join(map(mask_proxy, self._proxy_pool.removed))}",
                     Palette.YELLOW,
                 )
             )
@@ -387,12 +405,14 @@ class UsernameChecker:
             user = user_info["user"]
             # follower/video counts live at userInfo.stats, not user.stats
             stats = user_info.get("stats") or user.get("stats") or {}
+            if not isinstance(stats, dict):
+                stats = {}
             return (
                 "taken",
-                str(user.get("nickname", "")),
+                clean_text(user.get("nickname", "")),
                 bool(user.get("verified")),
-                int(stats.get("followerCount", 0) or 0),
-                str(user.get("signature", "")),
+                to_int(stats.get("followerCount", 0)),
+                clean_text(user.get("signature", "")),
             )
 
         status_code = user_detail.get("statusCode")
@@ -400,7 +420,7 @@ class UsernameChecker:
             return "available", "", False, 0, ""
 
         # Login wall / generic page without a clear verdict
-        return "blocked", "", False, 0, f"unexpected response (statusCode={status_code})"
+        return "blocked", "", False, 0, f"unexpected response (statusCode={clean_text(status_code)})"
 
     def _pace(self) -> None:
         if not self.delay:
@@ -621,6 +641,8 @@ def read_names_file(path: Path) -> Optional[List[str]]:
         lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         return None
+    except (OSError, UnicodeDecodeError) as exc:
+        sys.exit(f"Error: can't read {path} ({exc})")
     return [ln for ln in lines if ln.strip() and not ln.strip().startswith("#")]
 
 
@@ -637,6 +659,8 @@ def load_existing_hits(path: Path) -> set:
         lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         return set()
+    except (OSError, UnicodeDecodeError) as exc:
+        sys.exit(f"Error: can't read {path} ({exc})")
     return {ln.strip().lstrip("@").strip() for ln in lines if ln.strip() and not ln.startswith("#")}
 
 
@@ -672,7 +696,11 @@ def export_csv(path: Path, results: List[CheckResult]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for r in results:
-            writer.writerow(_result_dict(r))
+            row = _result_dict(r)
+            for key, value in row.items():
+                if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+                    row[key] = "'" + value  # stops Excel / Sheets from running it as a formula
+            writer.writerow(row)
 
 
 _STATUS_COLORS = {
@@ -1030,6 +1058,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         except FileNotFoundError:
             print(paint(f"Error: proxies file {args.proxies} not found!", Palette.RED))
             sys.exit(1)
+        except (OSError, UnicodeDecodeError) as exc:
+            print(paint(f"Error: can't read proxies file {args.proxies} ({exc})", Palette.RED))
+            sys.exit(1)
         if not proxies:
             print(paint(f"Warning: {args.proxies} is empty — running without proxies.", Palette.YELLOW))
 
@@ -1100,12 +1131,16 @@ def main(argv: Optional[List[str]] = None) -> None:
         save_hits(args.output, results, hits)
 
     checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
-    if args.json_out:
-        export_json(args.json_out, results, checked_at)
-    if args.csv_out:
-        export_csv(args.csv_out, results)
-    if args.html_out:
-        export_html(args.html_out, results, checked_at)
+    for attr, export in (("json_out", lambda path: export_json(path, results, checked_at)),
+                         ("csv_out", lambda path: export_csv(path, results)),
+                         ("html_out", lambda path: export_html(path, results, checked_at))):
+        path = getattr(args, attr)
+        if path:
+            try:
+                export(path)
+            except OSError as exc:
+                print(paint(f"Error: couldn't write {path} ({exc})", Palette.RED))
+                setattr(args, attr, None)  # so the summary doesn't list it
 
     print_summary(args, results, elapsed, len(hits) - known, known)
 
