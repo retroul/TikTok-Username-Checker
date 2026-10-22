@@ -1,7 +1,3 @@
-# This file contains the available TikTok usernames.
-# Each username listed here is available for registration.
-# Example:
-# available_username1
-# available_username2
-# available_username3
-
+# Usernames the checker found available, one per line.
+# "Available" means no account used the name at the time of the check.
+# TikTok can still refuse a name when you try to register it.
