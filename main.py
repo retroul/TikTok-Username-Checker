@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TikTok Username Checker — v2
-============================
+TikTok Username Checker v2
+==========================
 
-Checks whether TikTok usernames are taken or still available, for real.
+Checks whether TikTok usernames are taken or still available.
 
 How it works
 ------------
@@ -17,15 +17,15 @@ reads the *same* data TikTok's own web app uses. Every public profile page
                           (with nickname, verified flag, follower count, ...)
     * username free   ->  no "userInfo" and statusCode 10202 / 10221 (not found)
 
-This is far more reliable than checking the HTTP status code of the page
-(which returns 200 for every username, existing or not) — the old method
-this project used and which stopped working long ago.
+Checking the page's HTTP status code, the method this project used before,
+stopped working long ago: TikTok returns 200 for every username, existing
+or not.
 
 Available usernames are double-checked with a second, independent request
 (through another proxy when available) before being reported as free.
 
 This is not affiliated with or endorsed by TikTok. Use it responsibly and
-at your own risk — mass checking may lead to rate limiting of your IP.
+at your own risk. Mass checking may lead to rate limiting of your IP.
 Educational purposes only.
 
 Requirements
@@ -164,14 +164,14 @@ class CheckResult:
         width = len("[AVAILABLE]")  # pad labels so the URLs line up
         if self.status == "available":
             label = paint("[AVAILABLE]", Palette.GREEN)
-            extra = " — free right now, go grab it"
+            extra = " | free right now"
             if self.double_checked and not self.confirmed:
                 extra += paint(" (unconfirmed)", Palette.GRAY)
         elif self.status == "taken":
             label = paint("[TAKEN]".ljust(width), Palette.RED)
             extra = ""
             if self.nickname:
-                extra = f" — {self.nickname}"
+                extra = f" | {self.nickname}"
                 if self.verified:
                     extra += paint(" ✓verified", Palette.CYAN)
                 if self.followers:
@@ -180,10 +180,10 @@ class CheckResult:
                 extra += paint(" [corrected]", Palette.GRAY)
         elif self.status == "blocked":
             label = paint("[BLOCKED]".ljust(width), Palette.YELLOW)
-            extra = f" — {self.error or 'rate limited / captcha'}"
+            extra = f" | {self.error or 'rate limited / captcha'}"
         else:
             label = paint("[ERROR]".ljust(width), Palette.YELLOW)
-            extra = f" — {self.error}"
+            extra = f" | {self.error}"
         return f"{label} {self.url}{extra}"
 
 
@@ -458,7 +458,7 @@ class UsernameChecker:
 
         status, nickname, verified, followers, signature = self._parse_page(html)
         if status == "taken":
-            # first verdict was wrong (edge case) — trust the second one
+            # first verdict was wrong (edge case), so trust the second one
             self._report_outcome("taken")
             return CheckResult(
                 username, "taken", nickname, verified, followers, signature,
@@ -467,7 +467,7 @@ class UsernameChecker:
         if status == "available":
             self._report_outcome("available")
             return CheckResult(username, "available", double_checked=True, confirmed=True)
-        # second check inconclusive — keep the first verdict, flagged as unconfirmed
+        # second check inconclusive: keep the first verdict, flagged as unconfirmed
         self._report_outcome("available")
         return CheckResult(username, "available", double_checked=True, confirmed=False)
 
@@ -508,7 +508,7 @@ class UsernameChecker:
                 if self.verbose and attempt < self.max_retries:
                     print(
                         f"  {paint('[retry]', Palette.GRAY)} {username} "
-                        f"({last_error}) — attempt {attempt + 2}/{self.max_retries + 1}"
+                        f"({last_error}), attempt {attempt + 2}/{self.max_retries + 1}"
                     )
 
                 if attempt < self.max_retries:
@@ -563,7 +563,7 @@ class UsernameChecker:
                         if self.verbose and show_each:
                             self._print_progress(result, len(results), len(usernames))
                 except KeyboardInterrupt:
-                    print("\n" + paint("Interrupted — finishing and saving results...", Palette.YELLOW))
+                    print("\n" + paint("Interrupted. Finishing and saving results...", Palette.YELLOW))
                     self.stop_event.set()
                     for future in futures:
                         future.cancel()
@@ -749,7 +749,7 @@ def export_html(path: Path, results: List[CheckResult], checked_at: str) -> None
       <td><span class="status-dot" style="background:{color}"></span>{html.escape(r.username)}</td>
       <td><span class="badge" style="color:{color};border-color:{color}">{r.status}</span></td>
       <td><a href="{r.url}" target="_blank" rel="noopener">{html.escape(r.username)}</a></td>
-      <td>{" · ".join(details) if details else "—"}</td>
+      <td>{" · ".join(details) if details else "none"}</td>
     </tr>"""
         )
 
@@ -758,7 +758,7 @@ def export_html(path: Path, results: List[CheckResult], checked_at: str) -> None
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TikTok Username Checker — Report</title>
+<title>TikTok Username Checker: Report</title>
 <style>
   :root {{ color-scheme: dark; }}
   * {{ box-sizing: border-box; }}
@@ -785,7 +785,7 @@ def export_html(path: Path, results: List[CheckResult], checked_at: str) -> None
 </head>
 <body>
 <div class="wrap">
-  <h1>TikTok Username Checker — Report</h1>
+  <h1>TikTok Username Checker: Report</h1>
   <div class="sub">Checked {len(results)} username(s) · {html.escape(checked_at)}</div>
   <div class="stats">
     {''.join(bars)}
@@ -807,7 +807,7 @@ def export_html(path: Path, results: List[CheckResult], checked_at: str) -> None
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="main.py",
-        description="Real TikTok username availability checker (standard library only).",
+        description="TikTok username availability checker (standard library only).",
         epilog="Examples:\n"
         "  python3 main.py                      # type usernames and check them live\n"
         "  python3 main.py coolname cool.name   # check names straight away\n"
@@ -852,7 +852,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--no-double-check", action="store_true",
                         help="disable the second verification of available usernames")
     parser.add_argument("--no-auto-slowdown", action="store_true",
-                        help="disable the adaptive slowdown on repeated blocks")
+                        help="disable the slowdown on repeated blocks")
     parser.add_argument("--retry-blocked", action="store_true",
                         help="after the run, re-check blocked usernames with slower settings")
     parser.add_argument("--no-color", action="store_true",
@@ -916,7 +916,7 @@ def interactive_session(checker: UsernameChecker, output: Path, hits: set, sugge
 
     print(paint("Type a username and press Enter. Several at once work too: name1 name2, name3", Palette.GRAY))
     print(paint("Free ones are saved to " + str(output) + ". Type q (or press Ctrl+D) to finish.", Palette.GRAY))
-    print(paint(f"Name suggestions are {'on' if suggest else 'off'} — type 'suggest on' or 'suggest off' to switch.", Palette.GRAY))
+    print(paint(f"Name suggestions are {'on' if suggest else 'off'}. Type 'suggest on' or 'suggest off' to switch.", Palette.GRAY))
     print()
 
     results: List[CheckResult] = []
@@ -1023,7 +1023,7 @@ def print_summary(args: argparse.Namespace, results: List[CheckResult], elapsed:
                     "  a name that belonged to a banned account or is reserved.", Palette.GRAY))
     if stats["blocked"] or stats["error"]:
         print(paint("  Tip: if you see many BLOCKED, raise --delay and lower --threads, "
-                    "or add --proxies. TikTok rate-limits aggressively.", Palette.GRAY))
+                    "or add --proxies. TikTok rate-limits quickly.", Palette.GRAY))
     print(paint("=" * 60, Palette.BOLD))
 
 
@@ -1044,7 +1044,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if not args.quiet:
         print(paint(BANNER, Palette.CYAN))
-        print(paint(f"TikTok Username Checker v{VERSION} — real availability check via "
+        print(paint(f"TikTok Username Checker v{VERSION}: checks availability via "
                     "profile page data", Palette.BOLD))
         print()
 
@@ -1062,7 +1062,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             print(paint(f"Error: can't read proxies file {args.proxies} ({exc})", Palette.RED))
             sys.exit(1)
         if not proxies:
-            print(paint(f"Warning: {args.proxies} is empty — running without proxies.", Palette.YELLOW))
+            print(paint(f"Warning: {args.proxies} is empty, running without proxies.", Palette.YELLOW))
 
     # Where the names come from: command line > -i prompt > file > prompt (if nothing in the file)
     raw_names: List[str] = []
