@@ -320,8 +320,11 @@ python main.py --proxies proxies.txt
 
 `--json`, `--csv` and `--html` write every result with its details (status,
 url, nickname, verified badge, follower count, double-check status, error).
-The HTML report is a single self-contained page (dark theme, stat bars,
-colour-coded table) that opens in any browser and can be shared as-is.
+The HTML report is a single self-contained page (no internet needed) that
+opens in any browser and can be shared as-is. It follows your light or dark
+system theme, works on phones, and lets you filter by status, search, sort,
+copy every available name (or one at a time), and copy a ready-to-run command
+for the blocked or errored names so you can retry just those.
 
 Example JSON:
 

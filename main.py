@@ -703,100 +703,382 @@ def export_csv(path: Path, results: List[CheckResult]) -> None:
             writer.writerow(row)
 
 
-_STATUS_COLORS = {
-    "available": "#22c55e",
-    "taken": "#ef4444",
-    "blocked": "#f59e0b",
-    "error": "#9ca3af",
+_REPORT_STATUSES = (
+    ("available", "Available", "✓"),
+    ("taken", "Taken", "✕"),
+    ("blocked", "Blocked", "!"),
+    ("error", "Error", "?"),
+)
+
+_REPORT_CSS = """
+:root {
+  --color-paper: oklch(97.5% 0.006 255);
+  --color-surface: oklch(99% 0.004 255);
+  --color-ink: oklch(21% 0.02 255);
+  --color-muted: oklch(44% 0.02 255);
+  --color-rule: oklch(89% 0.01 255);
+  --color-accent: oklch(50% 0.17 258);
+  --color-available: oklch(44% 0.13 155);
+  --color-available-bg: oklch(94% 0.045 155);
+  --color-taken: oklch(50% 0.17 25);
+  --color-taken-bg: oklch(94% 0.035 25);
+  --color-blocked: oklch(46% 0.1 70);
+  --color-blocked-bg: oklch(94% 0.05 80);
+  --color-error: oklch(46% 0.02 255);
+  --color-error-bg: oklch(93% 0.01 255);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2.5rem;
+  --radius: 0.5rem;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  color-scheme: light;
 }
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-paper: oklch(16% 0.012 255);
+    --color-surface: oklch(20% 0.014 255);
+    --color-ink: oklch(94% 0.008 255);
+    --color-muted: oklch(72% 0.015 255);
+    --color-rule: oklch(30% 0.014 255);
+    --color-accent: oklch(74% 0.13 258);
+    --color-available: oklch(78% 0.14 155);
+    --color-available-bg: oklch(26% 0.05 155);
+    --color-taken: oklch(75% 0.13 25);
+    --color-taken-bg: oklch(27% 0.06 25);
+    --color-blocked: oklch(79% 0.12 80);
+    --color-blocked-bg: oklch(28% 0.05 80);
+    --color-error: oklch(74% 0.02 255);
+    --color-error-bg: oklch(27% 0.014 255);
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { overflow-x: clip; }
+body {
+  margin: 0;
+  padding: var(--space-xl) max(var(--space-md), env(safe-area-inset-left));
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font: 400 0.9375rem/1.5 var(--font-sans);
+}
+.wrap { max-width: 60rem; margin: 0 auto; min-width: 0; }
+h1 {
+  margin: 0 0 var(--space-xs);
+  font-size: clamp(1.75rem, 1rem + 3vw, 2.5rem);
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.sub { margin: 0 0 var(--space-lg); color: var(--color-muted); }
+.meter {
+  display: flex;
+  height: 0.5rem;
+  margin-bottom: var(--space-md);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--color-rule);
+}
+.seg { height: 100%; }
+.seg.s-available { background: var(--color-available); }
+.seg.s-taken { background: var(--color-taken); }
+.seg.s-blocked { background: var(--color-blocked); }
+.seg.s-error { background: var(--color-error); }
+.chips { display: flex; flex-wrap: wrap; gap: var(--space-sm); margin-bottom: var(--space-md); }
+.chip, .btn, .copy {
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-rule);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  transition: background-color 120ms var(--ease-out), border-color 120ms var(--ease-out);
+}
+.chip { display: inline-flex; align-items: center; gap: var(--space-sm); padding: 0.4rem 0.75rem; }
+.chip b { font-variant-numeric: tabular-nums; font-weight: 650; }
+.chip .glyph { font-weight: 700; }
+.chip[aria-pressed="true"] { border-color: var(--color-accent); box-shadow: inset 0 0 0 1px var(--color-accent); }
+.chip.s-available .glyph { color: var(--color-available); }
+.chip.s-taken .glyph { color: var(--color-taken); }
+.chip.s-blocked .glyph { color: var(--color-blocked); }
+.chip.s-error .glyph { color: var(--color-error); }
+.btn { padding: 0.5rem 0.9rem; font-weight: 600; }
+.btn-primary { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-paper); }
+.btn:disabled { cursor: not-allowed; opacity: 0.5; }
+.copy { padding: 0.15rem 0.6rem; font-size: 0.8125rem; color: var(--color-muted); }
+@media (hover: hover) {
+  .chip:hover, .copy:hover { border-color: var(--color-accent); }
+  .btn:not(:disabled):hover { filter: brightness(1.08); }
+}
+.chip:active, .btn:active, .copy:active { transform: translateY(1px); }
+.chip:focus-visible, .btn:focus-visible, .copy:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+.tools { display: grid; gap: var(--space-sm); margin-bottom: var(--space-md); }
+input[type="search"], select {
+  width: 100%;
+  min-width: 0;
+  padding: 0.5rem 0.75rem;
+  font: inherit;
+  color: var(--color-ink);
+  background: var(--color-surface);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius);
+}
+.count { margin: 0 0 var(--space-sm); color: var(--color-muted); font-size: 0.8125rem; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.list { background: var(--color-surface); border: 1px solid var(--color-rule); border-radius: var(--radius); overflow: hidden; }
+table, tbody, tr, td { display: block; }
+tr { padding: var(--space-md); border-top: 1px solid var(--color-rule); }
+tbody tr:first-child { border-top: 0; }
+td { padding: 0.125rem 0; min-width: 0; overflow-wrap: anywhere; }
+td[data-label]::before {
+  content: attr(data-label);
+  display: block;
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+.user { display: inline-flex; align-items: center; gap: var(--space-sm); flex-wrap: wrap; }
+.user a { font-family: var(--font-mono); font-weight: 600; color: var(--color-ink); text-decoration-color: var(--color-rule); text-underline-offset: 3px; }
+.user a:hover { color: var(--color-accent); text-decoration-color: var(--color-accent); }
+.badge {
+  display: inline-flex; align-items: center; gap: var(--space-xs);
+  padding: 0.1rem 0.6rem; border-radius: 999px;
+  font-size: 0.8125rem; font-weight: 600; white-space: nowrap;
+}
+.badge.s-available { color: var(--color-available); background: var(--color-available-bg); }
+.badge.s-taken { color: var(--color-taken); background: var(--color-taken-bg); }
+.badge.s-blocked { color: var(--color-blocked); background: var(--color-blocked-bg); }
+.badge.s-error { color: var(--color-error); background: var(--color-error-bg); }
+.num { font-variant-numeric: tabular-nums; }
+.dim { color: var(--color-muted); }
+.empty { margin: 0; padding: var(--space-lg) var(--space-md); color: var(--color-muted); text-align: center; }
+.retry { margin-top: var(--space-xl); }
+.retry h2 { margin: 0 0 var(--space-xs); font-size: 1.125rem; letter-spacing: -0.01em; }
+.retry p { margin: 0 0 var(--space-sm); color: var(--color-muted); }
+.retry code {
+  display: block; margin-bottom: var(--space-sm); padding: var(--space-sm) 0.75rem;
+  font: 0.8125rem/1.6 var(--font-mono);
+  background: var(--color-surface); border: 1px solid var(--color-rule); border-radius: var(--radius);
+  overflow-wrap: anywhere;
+}
+@media (min-width: 40rem) {
+  .tools { grid-template-columns: minmax(0, 1fr) 14rem auto; align-items: center; }
+  table { display: table; width: 100%; border-collapse: collapse; }
+  thead { display: table-header-group; }
+  tbody { display: table-row-group; }
+  tr { display: table-row; padding: 0; }
+  th, td { display: table-cell; padding: 0.7rem var(--space-md); text-align: left; vertical-align: middle; }
+  td[data-label]::before { display: none; }
+  th { font-size: 0.8125rem; font-weight: 600; color: var(--color-muted); border-bottom: 1px solid var(--color-rule); }
+  tbody tr { border-top: 1px solid var(--color-rule); }
+  tbody tr:first-child { border-top: 0; }
+  .num-col { text-align: right; }
+  td.num-col { text-align: right; }
+  .sr-only-th { position: static; width: auto; height: auto; margin: 0; clip: auto; overflow: visible; }
+}
+@media (pointer: coarse) {
+  .chip, .btn, .copy, input[type="search"], select { min-height: 2.75rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; }
+}
+"""
+
+_REPORT_JS = r"""
+(() => {
+  const body = document.querySelector("tbody");
+  const rows = Array.from(body.rows);
+  const chips = document.querySelectorAll("[data-filter]");
+  const search = document.getElementById("q");
+  const sort = document.getElementById("sort");
+  const count = document.getElementById("count");
+  const empty = document.getElementById("empty");
+  const order = { available: 0, taken: 1, blocked: 2, error: 3 };
+  const sorters = {
+    index: (a, b) => a.dataset.i - b.dataset.i,
+    name: (a, b) => a.dataset.name.localeCompare(b.dataset.name),
+    followers: (a, b) => b.dataset.followers - a.dataset.followers || a.dataset.i - b.dataset.i,
+    status: (a, b) => order[a.dataset.status] - order[b.dataset.status] || a.dataset.i - b.dataset.i,
+  };
+  let filter = "all";
+
+  function apply() {
+    const q = search.value.trim().toLowerCase();
+    let shown = 0;
+    for (const row of rows) {
+      const show = (filter === "all" || row.dataset.status === filter) && (!q || row.dataset.search.includes(q));
+      row.hidden = !show;
+      if (show) shown++;
+    }
+    empty.hidden = shown > 0;
+    count.textContent = shown + " of " + rows.length + " shown";
+  }
+
+  chips.forEach((chip) => chip.addEventListener("click", () => {
+    filter = chip.dataset.filter;
+    chips.forEach((c) => c.setAttribute("aria-pressed", String(c === chip)));
+    apply();
+  }));
+  search.addEventListener("input", apply);
+  sort.addEventListener("change", () => body.append(...rows.slice().sort(sorters[sort.value])));
+
+  function fallbackCopy(text) {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    area.remove();
+    return ok;
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      return fallbackCopy(text);
+    }
+  }
+
+  document.querySelectorAll("[data-copy], [data-copy-available]").forEach((btn) => {
+    const label = btn.textContent;
+    btn.addEventListener("click", async () => {
+      const text = btn.hasAttribute("data-copy-available")
+        ? rows.filter((r) => r.dataset.status === "available").map((r) => r.dataset.name).join("\n")
+        : btn.dataset.copy;
+      btn.textContent = (await copyText(text)) ? "Copied" : "Copy failed";
+      setTimeout(() => { btn.textContent = label; }, 1500);
+    });
+  });
+
+  apply();
+})();
+"""
 
 
 def export_html(path: Path, results: List[CheckResult], checked_at: str) -> None:
-    """Write a self-contained, styled HTML report of all results."""
-    total = len(results) or 1
+    """Write a self-contained HTML report: filter, search, sort and copy built in."""
+    total = len(results)
     stats = count_statuses(results)
 
-    bars = []
-    for label, key, color in (
-        ("Available", "available", "#22c55e"),
-        ("Taken", "taken", "#ef4444"),
-        ("Blocked", "blocked", "#f59e0b"),
-        ("Errors", "error", "#9ca3af"),
-    ):
-        count = stats[key]
-        pct = 100 * count / total
-        bars.append(
-            f"""<div class="stat">
-      <div class="stat-head"><span>{label}</span><span class="stat-num">{count} · {pct:.0f}%</span></div>
-      <div class="bar"><div class="bar-fill" style="width:{pct:.1f}%;background:{color}"></div></div>
-    </div>"""
+    meter = "".join(
+        f'<span class="seg s-{key}" style="width:{100 * stats[key] / total:.2f}%"></span>'
+        for key, _, _ in _REPORT_STATUSES
+        if stats[key]
+    )
+    meter_label = ", ".join(f"{stats[key]} {label.lower()}" for key, label, _ in _REPORT_STATUSES)
+
+    chips = [
+        f'<button type="button" class="chip" data-filter="all" aria-pressed="true">All <b>{total}</b></button>'
+    ]
+    for key, label, glyph in _REPORT_STATUSES:
+        chips.append(
+            f'<button type="button" class="chip s-{key}" data-filter="{key}" aria-pressed="false">'
+            f'<span class="glyph" aria-hidden="true">{glyph}</span>{label} <b>{stats[key]}</b></button>'
         )
 
     rows = []
-    for r in results:
-        color = _STATUS_COLORS.get(r.status, "#9ca3af")
+    for i, r in enumerate(results):
+        label, glyph = next((l, g) for k, l, g in _REPORT_STATUSES if k == r.status) if r.status in stats else (r.status, "?")
         details = []
         if r.nickname:
-            details.append(html.escape(r.nickname) + (" ✓" if r.verified else ""))
-        if r.followers:
-            details.append(f"{format_count(r.followers)} followers")
+            details.append(html.escape(r.nickname) + (" · verified" if r.verified else ""))
         if r.double_checked:
-            details.append("double-checked" if r.confirmed else "double-checked (unconfirmed)")
+            details.append("double-checked" if r.confirmed else "double-check unconfirmed")
         if r.error:
             details.append(html.escape(r.error))
+        copy_btn = (
+            f'<button type="button" class="copy" data-copy="{html.escape(r.username)}" '
+            f'aria-label="Copy {html.escape(r.username)}">Copy</button>'
+            if r.status == "available" else ""
+        )
+        followers = format_count(r.followers) if r.followers else "—"
+        search_text = html.escape(f"{r.username} {r.nickname}".lower())
         rows.append(
-            f"""<tr>
-      <td><span class="status-dot" style="background:{color}"></span>{html.escape(r.username)}</td>
-      <td><span class="badge" style="color:{color};border-color:{color}">{r.status}</span></td>
-      <td><a href="{r.url}" target="_blank" rel="noopener">{html.escape(r.username)}</a></td>
-      <td>{" · ".join(details) if details else "none"}</td>
-    </tr>"""
+            f'<tr data-i="{i}" data-status="{html.escape(r.status)}" data-name="{html.escape(r.username)}" '
+            f'data-followers="{r.followers}" data-search="{search_text}">'
+            f'<td data-label="Username"><span class="user"><a href="{html.escape(r.url)}" target="_blank" rel="noopener">@{html.escape(r.username)}</a>{copy_btn}</span></td>'
+            f'<td data-label="Status"><span class="badge s-{html.escape(r.status)}"><span aria-hidden="true">{glyph}</span>{label}</span></td>'
+            f'<td class="num num-col" data-label="Followers">{followers}</td>'
+            f'<td class="dim" data-label="Details">{" · ".join(details) if details else "—"}</td>'
+            f"</tr>"
         )
 
+    retry_names = [r.username for r in results if r.status in ("blocked", "error")]
+    retry = ""
+    if retry_names:
+        command = "python main.py " + " ".join(retry_names)
+        retry = f"""
+  <section class="retry" aria-labelledby="retry-h">
+    <h2 id="retry-h">Retry these {len(retry_names)}</h2>
+    <p>TikTok blocked or failed these names. Run them again, ideally with a higher delay or proxies.</p>
+    <code>{html.escape(command)}</code>
+    <button type="button" class="btn" data-copy="{html.escape(command)}">Copy command</button>
+  </section>"""
+
+    noun = "username" if total == 1 else "usernames"
     doc = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>TikTok Username Checker: Report</title>
 <style>
-  :root {{ color-scheme: dark; }}
-  * {{ box-sizing: border-box; }}
-  body {{ margin: 0; padding: 32px 16px; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
-         background: #0f1115; color: #e5e7eb; }}
-  .wrap {{ max-width: 880px; margin: 0 auto; }}
-  h1 {{ font-size: 22px; margin: 0 0 4px; }}
-  .sub {{ color: #9ca3af; font-size: 13px; margin-bottom: 24px; }}
-  .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }}
-  .stat {{ background: #1a1d24; border: 1px solid #262a33; border-radius: 10px; padding: 12px 14px; }}
-  .stat-head {{ display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 8px; }}
-  .stat-num {{ color: #9ca3af; }}
-  .bar {{ height: 6px; background: #262a33; border-radius: 3px; overflow: hidden; }}
-  .bar-fill {{ height: 100%; border-radius: 3px; }}
-  table {{ width: 100%; border-collapse: collapse; background: #1a1d24; border: 1px solid #262a33; border-radius: 10px; overflow: hidden; }}
-  th, td {{ padding: 10px 14px; text-align: left; font-size: 13px; }}
-  th {{ background: #232733; color: #d1d5db; font-weight: 600; }}
-  td {{ border-top: 1px solid #262a33; }}
-  a {{ color: #60a5fa; text-decoration: none; }}
-  a:hover {{ text-decoration: underline; }}
-  .status-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }}
-  .badge {{ display: inline-block; padding: 2px 10px; border: 1px solid; border-radius: 999px; font-size: 12px; }}
+/* Hallmark · genre: modern-minimal · macrostructure: Long Document (report) · theme: custom cool-paper / cobalt accent
+ * nav: none · footer: none · enrichment: none (typography only)
+ * pre-emit critique: P4 H4 E4 S4 R5 V3 */
+{_REPORT_CSS}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>TikTok Username Checker: Report</h1>
-  <div class="sub">Checked {len(results)} username(s) · {html.escape(checked_at)}</div>
-  <div class="stats">
-    {''.join(bars)}
+  <h1>Username report</h1>
+  <p class="sub">{total} {noun} checked · {html.escape(checked_at)}</p>
+  <div class="meter" role="img" aria-label="{html.escape(meter_label)}">{meter}</div>
+  <div class="chips" role="group" aria-label="Filter by status">
+    {"".join(chips)}
   </div>
-  <table>
-    <thead><tr><th>Username</th><th>Status</th><th>Profile</th><th>Details</th></tr></thead>
-    <tbody>
-    {''.join(rows)}
-    </tbody>
-  </table>
+  <div class="tools">
+    <label class="sr-only" for="q">Search usernames</label>
+    <input type="search" id="q" placeholder="Search usernames" autocomplete="off">
+    <label class="sr-only" for="sort">Sort by</label>
+    <select id="sort">
+      <option value="index">Original order</option>
+      <option value="name">Username A–Z</option>
+      <option value="followers">Followers, high to low</option>
+      <option value="status">Status</option>
+    </select>
+    <button type="button" class="btn btn-primary" data-copy-available{"" if stats["available"] else " disabled"}>Copy available ({stats["available"]})</button>
+  </div>
+  <p class="count" id="count" aria-live="polite"></p>
+  <div class="list">
+    <table>
+      <thead><tr class="sr-only sr-only-th"><th scope="col">Username</th><th scope="col">Status</th><th scope="col" class="num-col">Followers</th><th scope="col">Details</th></tr></thead>
+      <tbody>
+      {"".join(rows)}
+      </tbody>
+    </table>
+    <p class="empty" id="empty" hidden>No usernames match.</p>
+  </div>{retry}
 </div>
+<script>
+{_REPORT_JS}
+</script>
 </body>
 </html>
 """
