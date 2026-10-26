@@ -1,6 +1,9 @@
 # TikTok Username Checker
 
-> v2.4 adds a type-and-check prompt, optional name suggestions (`--suggest`) and
+> v2.5 adds Discord alerts for watch mode (`--discord`), name patterns
+> (`--pattern 'ab?#'`) and `--skip-checked` to skip names you checked recently.
+>
+> v2.4 added a type-and-check prompt, optional name suggestions (`--suggest`) and
 > optional watch mode (`--watch`) that alerts you when a taken name becomes free.
 >
 > v2 is a rewrite. The old version checked the page's HTTP status code, which
@@ -238,6 +241,50 @@ Next check at 14:30.
   its own once every name is free.
 - The minimum interval is 1 minute. Checking more often doesn't help and
   gets you rate-limited, so 15–60 minutes is a good range.
+- `--json`, `--csv` and `--html` work here too. The files are rewritten after
+  every check with the newest result for each name.
+
+#### Discord alerts
+
+Add a Discord webhook and watch mode posts to your channel when a name frees
+up, so you get it on your phone. In Discord: channel settings → Integrations →
+Webhooks → New Webhook → Copy Webhook URL.
+
+```sh
+export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."   # Windows: set DISCORD_WEBHOOK_URL=...
+python3 main.py --watch coolname
+```
+
+`--discord <url>` works too, but the environment variable keeps the URL out of
+your shell history. Treat the URL like a password: anyone who has it can post
+to your channel. A test message is sent when the watch starts.
+
+### Name patterns
+
+`--pattern` checks every name that fits a pattern. `?` is any letter, `#` any
+digit, `*` either. Put the pattern in quotes so your shell leaves it alone.
+
+```sh
+python3 main.py --pattern 'ab?#'        # aba0 ... abz9 (260 names)
+python3 main.py --pattern 'x**' --pattern 'y**'
+```
+
+Patterns are refused if together they make more than 1000 names (change it
+with `--max-names`). Big lists get you rate-limited fast, so start small.
+
+### Skip names you already checked
+
+Every taken or available verdict is saved to `checked.json` in the current
+folder. `--skip-checked` skips names found in the last 24 hours, plus names
+already in `hits.txt`. `--skip-hours` changes the window:
+
+```sh
+python3 main.py -f usernames.txt --skip-checked       # last 24 hours
+python3 main.py -f usernames.txt --skip-checked --skip-hours 6   # last 6 hours
+```
+
+Blocked, error and unconfirmed results are never saved, so those names are always checked
+again. Entries older than 30 days are dropped.
 
 Invalid names are skipped with the reason (too short or long, characters
 TikTok doesn't allow, ending with a period). A leading `@` is fine, and
@@ -268,6 +315,11 @@ python main.py --no-color       # plain output (e.g. for piping to a file)
 | `--suggest`     | off | check ~10 similar names when a name is taken |
 | `--watch`       | off | keep re-checking the names and alert when one becomes free |
 | `--every`       | `30` | with `--watch`: minutes between checks (minimum 1) |
+| `--discord`     | off | with `--watch`: Discord webhook URL to alert (or set `DISCORD_WEBHOOK_URL`) |
+| `--pattern`     | none | check every name a pattern makes (`?` letter, `#` digit, `*` either) |
+| `--max-names`   | `1000` | with `--pattern`: most names the patterns may make |
+| `--skip-checked` | off | skip names in `hits.txt` and names checked in the last `--skip-hours` |
+| `--skip-hours`  | `24` | with `--skip-checked`: how many hours back to look |
 | `-f, --file`    | `usernames.txt` | input file, one username per line (lines starting with `#` are ignored) |
 | `-o, --output`  | `hits.txt` | where available usernames are saved |
 | `--json`        | none | export all results (with details) to a JSON file |

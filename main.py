@@ -47,8 +47,8 @@ from __future__ import annotations
 
 import argparse
 import csv
-import gzip
 import html
+import itertools
 import json
 import os
 import random
@@ -65,9 +65,23 @@ from pathlib import Path
 from threading import Event, Lock
 from typing import Dict, List, Optional, Tuple
 
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 
 HOME_URL = "https://www.tiktok.com"
+MAX_PAGE_BYTES = 8 * 1024 * 1024  # profile pages are ~400 KB; anything far bigger is not one
+HISTORY_FILE = Path("checked.json")  # past verdicts, used by --skip-checked
+HISTORY_KEEP_DAYS = 30
+
+DISCORD_WEBHOOK_RE = re.compile(
+    r"https://(?:(?:canary|ptb)\.)?discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]+"
+)
+
+# --pattern wildcards
+PATTERN_WILDCARDS = {
+    "?": "abcdefghijklmnopqrstuvwxyz",
+    "#": "0123456789",
+    "*": "abcdefghijklmnopqrstuvwxyz0123456789",
+}
 DEFAULT_NAMES_FILE = Path("usernames.txt")
 
 USER_AGENTS = [
@@ -334,9 +348,17 @@ class UsernameChecker:
             with opener.open(req, timeout=self.timeout) as resp:
                 if resp.status != 200:
                     return None, "http"
-                data = resp.read()
+                data = resp.read(MAX_PAGE_BYTES + 1)
+                if len(data) > MAX_PAGE_BYTES:
+                    return None, "http"
                 if resp.headers.get("Content-Encoding", "").lower() == "gzip":
-                    data = gzip.decompress(data)
+                    # bounded decompress, so a hostile or broken response can't eat all memory
+                    inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                    data = inflater.decompress(data, MAX_PAGE_BYTES + 1)
+                    if len(data) > MAX_PAGE_BYTES:
+                        return None, "http"
+                    if not inflater.eof:  # cut off mid-page: retry instead of judging half a page
+                        return None, "connection"
             return data.decode("utf-8", errors="replace"), "ok"
         except urllib.error.HTTPError as exc:
             if exc.code in (403, 429):
@@ -451,7 +473,7 @@ class UsernameChecker:
         if html is None:
             if err == "connection" and proxy:
                 self._proxy_pool.mark_failure(proxy, verbose=self.verbose)
-            self._report_outcome("available")
+            self._report_outcome("blocked" if err == "rate-limited" else "available")
             return CheckResult(username, "available", double_checked=True, confirmed=False)
         if proxy:
             self._proxy_pool.mark_success(proxy)
@@ -467,8 +489,8 @@ class UsernameChecker:
         if status == "available":
             self._report_outcome("available")
             return CheckResult(username, "available", double_checked=True, confirmed=True)
-        # second check inconclusive: keep the first verdict, flagged as unconfirmed
-        self._report_outcome("available")
+        # second check hit a block page: keep the first verdict, flagged as unconfirmed
+        self._report_outcome("blocked")
         return CheckResult(username, "available", double_checked=True, confirmed=False)
 
     def check(self, username: str) -> CheckResult:
@@ -579,6 +601,9 @@ class UsernameChecker:
             print("\n" + paint("Stopped.", Palette.YELLOW))
             self.stop_event.set()
 
+        # results arrive in finishing order; hand them back in the order they were asked for
+        position = {name: i for i, name in enumerate(usernames)}
+        results.sort(key=lambda r: position.get(r.username, len(position)))
         self.elapsed = time.monotonic() - start
         self.stats = count_statuses(results)
         return results
@@ -636,7 +661,7 @@ def clean_names(raw_names: List[str]) -> Tuple[List[str], List[Tuple[str, str]]]
 
 
 def read_names_file(path: Path) -> Optional[List[str]]:
-    """Return the non-comment lines of a usernames file, or None if it doesn't exist."""
+    """Return the non-comment lines of a usernames (or proxies) file, or None if it doesn't exist."""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
@@ -661,20 +686,131 @@ def load_existing_hits(path: Path) -> set:
         return set()
     except (OSError, UnicodeDecodeError) as exc:
         sys.exit(f"Error: can't read {path} ({exc})")
-    return {ln.strip().lstrip("@").strip() for ln in lines if ln.strip() and not ln.startswith("#")}
+    # lower-case, because TikTok usernames are case-insensitive
+    return {
+        ln.strip().lstrip("@").strip().lower()
+        for ln in lines if ln.strip() and not ln.strip().startswith("#")
+    }
 
 
 def save_hits(path: Path, results: List[CheckResult], existing: set) -> int:
-    """Append newly found available usernames (and add them to `existing`).
+    """Append newly found available usernames (and add them, lower-cased, to `existing`).
     Returns number written."""
-    new = [r.username for r in results if r.status == "available" and r.username not in existing]
+    new: List[str] = []
+    for r in results:
+        if r.status == "available" and r.username.lower() not in existing:
+            existing.add(r.username.lower())
+            new.append(r.username)
     if not new:
         return 0
-    with path.open("a", encoding="utf-8") as f:
-        for username in new:
-            f.write(f"{username}\n")
-    existing.update(new)
+    try:
+        # a hand-edited file may not end with a newline; don't glue a name onto its last line
+        with path.open("rb") as f:
+            needs_newline = False
+            if f.seek(0, os.SEEK_END) > 0:  # only look at the last byte, however big the file
+                f.seek(-1, os.SEEK_END)
+                needs_newline = f.read(1) != b"\n"
+    except OSError:  # missing file, or the write below will report the problem
+        needs_newline = False
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(("\n" if needs_newline else "") + "".join(f"{u}\n" for u in new))
+    except OSError as exc:
+        existing.difference_update(u.lower() for u in new)
+        print(paint(f"Error: couldn't save hits to {path} ({exc}). Free names: {', '.join(new)}", Palette.RED))
+        return 0
     return len(new)
+
+
+def load_checked(path: Path) -> Dict[str, dict]:
+    """History of past checks: {lower-case name: {"status": ..., "at": unix time}}."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        print(paint(f"Warning: ignoring {path} ({exc})", Palette.YELLOW))
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        name: entry for name, entry in data.items()
+        if isinstance(entry, dict) and isinstance(entry.get("at"), (int, float))
+    }
+
+
+def record_checked(path: Path, results: List[CheckResult]) -> None:
+    """Add taken/available verdicts to the history (blocked and error ones prove nothing).
+    Entries older than HISTORY_KEEP_DAYS are dropped so the file stays small."""
+    # an "available" whose double-check failed (confirmed=False) is not proof either
+    conclusive = [
+        r for r in results
+        if r.status == "taken" or (r.status == "available" and r.confirmed is not False)
+    ]
+    if not conclusive:
+        return
+    now = int(time.time())
+    cutoff = now - HISTORY_KEEP_DAYS * 86400
+    data = {name: e for name, e in load_checked(path).items() if e["at"] >= cutoff}
+    for r in conclusive:
+        data[r.username.lower()] = {"status": r.status, "at": now}
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # per-process, so two runs can't clash
+    try:
+        tmp.write_text(json.dumps(data, indent=0, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)  # all-or-nothing, so a crash can't leave half a file
+    except OSError as exc:
+        print(paint(f"Warning: couldn't update {path} ({exc})", Palette.YELLOW))
+
+
+def store_results(output: Path, results: List[CheckResult], hits: set) -> int:
+    """Save new free names to the hits file and every verdict to the history file."""
+    record_checked(HISTORY_FILE, results)
+    return save_hits(output, results, hits)
+
+
+def recently_checked(path: Path, hours: float) -> set:
+    cutoff = time.time() - hours * 3600
+    return {name for name, e in load_checked(path).items() if e["at"] >= cutoff}
+
+
+def discord_webhook(url: str) -> str:
+    """argparse type: accept only a real Discord webhook address."""
+    if not DISCORD_WEBHOOK_RE.fullmatch(url.strip()):
+        raise argparse.ArgumentTypeError(
+            "must look like https://discord.com/api/webhooks/<id>/<token>"
+        )
+    return url.strip()
+
+
+def send_discord(url: str, text: str, timeout: int) -> bool:
+    """Post `text` to a Discord webhook. Returns True if Discord accepted it.
+    The URL is a secret, so it never goes into error messages."""
+    body = json.dumps({"content": text, "allowed_mentions": {"parse": []}}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        # Discord turns away Python's default User-Agent
+        headers={"Content-Type": "application/json", "User-Agent": f"TikTokUsernameChecker/{VERSION}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return 200 <= resp.status < 300
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def expand_pattern(pattern: str, limit: int) -> List[str]:
+    """'ab?#' -> every name it can make (? = letter, # = digit, * = either).
+    Raises ValueError if that would be more than `limit` names."""
+    pools = [PATTERN_WILDCARDS.get(ch, ch) for ch in pattern.strip().lstrip("@").lower()]
+    total = 1
+    for pool in pools:
+        total *= len(pool)
+        if total > limit:
+            raise ValueError(
+                f"pattern '{pattern}' goes over the --max-names limit ({limit:,} names left). "
+                "Use fewer wildcards, or raise --max-names."
+            )
+    return ["".join(chars) for chars in itertools.product(*pools)]
 
 
 def export_json(path: Path, results: List[CheckResult], checked_at: str) -> None:
@@ -838,16 +974,20 @@ input[type="search"], select {
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
 .list { background: var(--color-surface); border: 1px solid var(--color-rule); border-radius: var(--radius); overflow: hidden; }
-table, tbody, tr, td { display: block; }
-tr { padding: var(--space-md); border-top: 1px solid var(--color-rule); }
-tbody tr:first-child { border-top: 0; }
-td { padding: 0.125rem 0; min-width: 0; overflow-wrap: anywhere; }
-td[data-label]::before {
-  content: attr(data-label);
-  display: block;
-  color: var(--color-muted);
-  font-size: 0.75rem;
+table, tbody { display: block; }
+tr {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-xs) var(--space-md);
+  padding: 0.75rem var(--space-md);
+  border-top: 1px solid var(--color-rule);
 }
+tbody tr:first-child { border-top: 0; }
+td { display: block; padding: 0; min-width: 0; overflow-wrap: anywhere; }
+td.num-col, td.dim { grid-column: 1 / -1; font-size: 0.8125rem; color: var(--color-muted); }
+td.blank { display: none; }
+td.num-col:not(.blank)::after { content: " followers"; }
 .user { display: inline-flex; align-items: center; gap: var(--space-sm); flex-wrap: wrap; }
 .user a { font-family: var(--font-mono); font-weight: 600; color: var(--color-ink); text-decoration-color: var(--color-rule); text-underline-offset: 3px; }
 .user a:hover { color: var(--color-accent); text-decoration-color: var(--color-accent); }
@@ -878,8 +1018,10 @@ td[data-label]::before {
   thead { display: table-header-group; }
   tbody { display: table-row-group; }
   tr { display: table-row; padding: 0; }
-  th, td { display: table-cell; padding: 0.7rem var(--space-md); text-align: left; vertical-align: middle; }
-  td[data-label]::before { display: none; }
+  th, td, td.blank { display: table-cell; padding: 0.7rem var(--space-md); text-align: left; vertical-align: middle; }
+  td.num-col, td.dim { font-size: inherit; }
+  td.num-col { color: var(--color-ink); }
+  td.num-col:not(.blank)::after { content: none; }
   th { font-size: 0.8125rem; font-weight: 600; color: var(--color-muted); border-bottom: 1px solid var(--color-rule); }
   tbody tr { border-top: 1px solid var(--color-rule); }
   tbody tr:first-child { border-top: 0; }
@@ -1012,10 +1154,10 @@ def export_html(path: Path, results: List[CheckResult], checked_at: str) -> None
         rows.append(
             f'<tr data-i="{i}" data-status="{html.escape(r.status)}" data-name="{html.escape(r.username)}" '
             f'data-followers="{r.followers}" data-search="{search_text}">'
-            f'<td data-label="Username"><span class="user"><a href="{html.escape(r.url)}" target="_blank" rel="noopener">@{html.escape(r.username)}</a>{copy_btn}</span></td>'
-            f'<td data-label="Status"><span class="badge s-{html.escape(r.status)}"><span aria-hidden="true">{glyph}</span>{label}</span></td>'
-            f'<td class="num num-col" data-label="Followers">{followers}</td>'
-            f'<td class="dim" data-label="Details">{" · ".join(details) if details else "—"}</td>'
+            f'<td><span class="user"><a href="{html.escape(r.url)}" target="_blank" rel="noopener">@{html.escape(r.username)}</a>{copy_btn}</span></td>'
+            f'<td><span class="badge s-{html.escape(r.status)}"><span aria-hidden="true">{glyph}</span>{label}</span></td>'
+            f'<td class="num num-col{"" if r.followers else " blank"}">{followers}</td>'
+            f'<td class="dim{"" if details else " blank"}">{" · ".join(details) if details else "—"}</td>'
             f"</tr>"
         )
 
@@ -1032,6 +1174,10 @@ def export_html(path: Path, results: List[CheckResult], checked_at: str) -> None
   </section>"""
 
     noun = "username" if total == 1 else "usernames"
+    try:
+        when = datetime.fromisoformat(checked_at).strftime("%d %b %Y, %H:%M")
+    except ValueError:
+        when = checked_at
     doc = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1048,7 +1194,7 @@ def export_html(path: Path, results: List[CheckResult], checked_at: str) -> None
 <body>
 <div class="wrap">
   <h1>Username report</h1>
-  <p class="sub">{total} {noun} checked · {html.escape(checked_at)}</p>
+  <p class="sub">{total} {noun} checked · <time datetime="{html.escape(checked_at)}">{html.escape(when)}</time></p>
   <div class="meter" role="img" aria-label="{html.escape(meter_label)}">{meter}</div>
   <div class="chips" role="group" aria-label="Filter by status">
     {"".join(chips)}
@@ -1086,6 +1232,20 @@ def export_html(path: Path, results: List[CheckResult], checked_at: str) -> None
         f.write(doc)
 
 
+def positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return value
+
+
+def positive_float(text: str) -> float:
+    value = float(text)
+    if not value > 0 or value == float("inf"):  # also rejects nan
+        raise argparse.ArgumentTypeError("must be more than 0")
+    return value
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="main.py",
@@ -1105,8 +1265,21 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="when a name is taken, check ~10 similar names and show the free ones (off by default)")
     parser.add_argument("--watch", action="store_true",
                         help="keep re-checking taken names and alert you when one becomes free (off by default)")
-    parser.add_argument("--every", type=float, default=30.0, metavar="MINUTES",
+    parser.add_argument("--every", type=positive_float, default=30.0, metavar="MINUTES",
                         help="with --watch: minutes between checks (default: 30, minimum: 1)")
+    parser.add_argument("--discord", type=discord_webhook, default=None, metavar="WEBHOOK_URL",
+                        help="with --watch: post to this Discord webhook when a name frees up "
+                             "(or set DISCORD_WEBHOOK_URL, which keeps it out of your shell history)")
+    parser.add_argument("--pattern", action="append", default=[], metavar="PATTERN",
+                        help="check every name a pattern makes: ? = letter, # = digit, * = either. "
+                             "Quote it, e.g. --pattern 'ab?#'. Can be given more than once")
+    parser.add_argument("--max-names", type=positive_int, default=1000, metavar="N",
+                        help="with --pattern: refuse patterns that make more than N names (default: 1000)")
+    parser.add_argument("--skip-checked", action="store_true",
+                        help="skip names already in the hits file or checked in the last "
+                             f"--skip-hours. Past checks are kept in {HISTORY_FILE}")
+    parser.add_argument("--skip-hours", type=positive_float, default=24.0, metavar="HOURS",
+                        help="with --skip-checked: how far back to look (default: 24)")
     parser.add_argument("-f", "--file", type=Path, default=None,
                         help=f"file with usernames, one per line (default: {DEFAULT_NAMES_FILE})")
     parser.add_argument("-o", "--output", type=Path, default=Path("hits.txt"),
@@ -1121,7 +1294,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="number of concurrent workers (default: 10)")
     parser.add_argument("-d", "--delay", type=float, default=0.6,
                         help="seconds to wait between requests, 0 to disable (default: 0.6)")
-    parser.add_argument("--timeout", type=int, default=15,
+    parser.add_argument("--timeout", type=positive_int, default=15,
                         help="per-request timeout in seconds (default: 15)")
     parser.add_argument("-r", "--max-retries", type=int, default=3,
                         help="retries per username on rate-limit/block (default: 3)")
@@ -1228,18 +1401,30 @@ def interactive_session(checker: UsernameChecker, output: Path, hits: set, sugge
             start = time.monotonic()
             batch += suggest_for_taken(checker, batch)
             elapsed += time.monotonic() - start
-        save_hits(output, batch, hits)
+        store_results(output, batch, hits)
         results.extend(batch)
         print()
     return results, elapsed
 
 
-def watch_names(checker: UsernameChecker, names: List[str], every_minutes: float,
-                output: Path, hits: set) -> None:
-    """Re-check `names` every `every_minutes` until each one is free (or Ctrl+C)."""
+def watch_names(checker: UsernameChecker, names: List[str], args: argparse.Namespace,
+                hits: set, discord: Optional[str]) -> None:
+    """Re-check `names` every --every minutes until each one is free (or Ctrl+C).
+    Exports are rewritten after each round with the newest verdict for every name."""
+    every_minutes = max(args.every, 1.0)
+    output = args.output
     remaining = list(names)
+    latest: Dict[str, CheckResult] = {}
     print(paint(f"Watching {len(remaining)} name(s), checking every {every_minutes:g} minute(s). "
                 "Leave this window open; press Ctrl+C to stop.", Palette.BOLD))
+    if discord:
+        shown = ", ".join(names[:20]) + (f" and {len(names) - 20} more" if len(names) > 20 else "")
+        # 20 names x 24 chars stays well under Discord's 2000-character message limit
+        if send_discord(discord, f"Watching {len(names)} TikTok name(s): {shown}", checker.timeout):
+            print(paint("Discord alerts on (test message sent).", Palette.GRAY))
+        else:
+            print(paint("Warning: Discord didn't accept the test message. Check the webhook URL; "
+                        "watching anyway.", Palette.YELLOW))
     round_no = 0
     while remaining:
         round_no += 1
@@ -1247,15 +1432,20 @@ def watch_names(checker: UsernameChecker, names: List[str], every_minutes: float
         print(paint(f"[{datetime.now():%H:%M:%S}] Check #{round_no}: {len(remaining)} name(s)", Palette.GRAY))
         checker.stop_event.clear()
         batch = checker.run(remaining, announce=False)
-        if checker.stop_event.is_set():  # Ctrl+C during the check
-            break
+        stopped = checker.stop_event.is_set()  # Ctrl+C during the check
+        # handle the finished part of the batch first, so a name freed just before Ctrl+C isn't lost
+        latest.update((r.username, r) for r in batch)
         freed = [r for r in batch if r.status == "available"]
         for result in freed:
             remaining.remove(result.username)
             # \a rings the terminal bell so you notice even if the window is in the background
             print("\a" + paint(f">>> @{result.username} is FREE now! Grab it: {result.url}", Palette.GREEN))
-        save_hits(output, freed, hits)
-        if not remaining:
+            if discord and not send_discord(discord, f"@{result.username} is free on TikTok: {result.url}",
+                                            checker.timeout):
+                print(paint("  Couldn't send the Discord alert.", Palette.YELLOW))
+        store_results(output, batch, hits)
+        write_exports(args, [latest[n] for n in names if n in latest])
+        if stopped or not remaining:
             break
         next_at = datetime.now().timestamp() + every_minutes * 60
         print(paint(f"Next check at {datetime.fromtimestamp(next_at):%H:%M}.", Palette.GRAY))
@@ -1271,6 +1461,27 @@ def watch_names(checker: UsernameChecker, names: List[str], every_minutes: float
                 + (f" ({', '.join(remaining)})" if remaining else ""), Palette.BOLD))
     if freed_count:
         print(paint(f"Free names were saved to {output}.", Palette.GRAY))
+    written = [str(p) for p in (args.json_out, args.csv_out, args.html_out) if p and latest]
+    if written:
+        print(paint(f"Latest results are in {', '.join(written)}.", Palette.GRAY))
+
+
+def write_exports(args: argparse.Namespace, results: List[CheckResult]) -> None:
+    """Write the --json / --csv / --html files that were asked for. A file that can't be
+    written is reported once and then dropped, so the summary doesn't list it."""
+    if not results:
+        return
+    checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    for attr, export in (("json_out", lambda path: export_json(path, results, checked_at)),
+                         ("csv_out", lambda path: export_csv(path, results)),
+                         ("html_out", lambda path: export_html(path, results, checked_at))):
+        path = getattr(args, attr)
+        if path:
+            try:
+                export(path)
+            except OSError as exc:
+                print(paint(f"Error: couldn't write {path} ({exc})", Palette.RED))
+                setattr(args, attr, None)
 
 
 def print_summary(args: argparse.Namespace, results: List[CheckResult], elapsed: float, written: int, known: int) -> None:
@@ -1330,27 +1541,31 @@ def main(argv: Optional[List[str]] = None) -> None:
                     "profile page data", Palette.BOLD))
         print()
 
+    if args.discord and not args.watch:
+        print(paint("Error: --discord only works together with --watch.", Palette.RED))
+        sys.exit(1)
+
     proxies: List[str] = []
     if args.proxies:
-        try:
-            proxies = [
-                ln.strip() for ln in args.proxies.read_text(encoding="utf-8").splitlines()
-                if ln.strip() and not ln.startswith("#")
-            ]
-        except FileNotFoundError:
+        proxy_lines = read_names_file(args.proxies)
+        if proxy_lines is None:
             print(paint(f"Error: proxies file {args.proxies} not found!", Palette.RED))
             sys.exit(1)
-        except (OSError, UnicodeDecodeError) as exc:
-            print(paint(f"Error: can't read proxies file {args.proxies} ({exc})", Palette.RED))
-            sys.exit(1)
+        proxies = [ln.strip() for ln in proxy_lines]
         if not proxies:
             print(paint(f"Warning: {args.proxies} is empty, running without proxies.", Palette.YELLOW))
 
-    # Where the names come from: command line > -i prompt > file > prompt (if nothing in the file)
-    raw_names: List[str] = []
-    if args.usernames:
-        raw_names = [n for arg in args.usernames for n in split_names(arg)]
-    elif not args.interactive:
+    # Where the names come from: command line / --pattern > -i prompt > file > prompt (if nothing in the file)
+    raw_names: List[str] = [n for arg in args.usernames for n in split_names(arg)]
+    generated: List[str] = []
+    for pattern in args.pattern:
+        try:  # the --max-names budget is shared by all patterns
+            generated += expand_pattern(pattern, args.max_names - len(generated))
+        except ValueError as exc:
+            print(paint(f"Error: {exc}", Palette.RED))
+            sys.exit(1)
+    raw_names += generated
+    if not raw_names and not args.interactive:
         names_file = args.file or DEFAULT_NAMES_FILE
         file_names = read_names_file(names_file)
         if file_names is None and args.file:
@@ -1377,6 +1592,31 @@ def main(argv: Optional[List[str]] = None) -> None:
             print(paint("No valid usernames to check.", Palette.RED))
             sys.exit(1)
 
+    hits = load_existing_hits(args.output)
+    known = len(hits)
+
+    if args.skip_checked:
+        if args.watch or interactive:
+            print(paint("Note: --skip-checked only applies to a list of names, not to "
+                        "--watch or the prompt.", Palette.YELLOW))
+        else:
+            done = hits | recently_checked(HISTORY_FILE, args.skip_hours)
+            skipped = [n for n in valid if n.lower() in done]
+            valid = [n for n in valid if n.lower() not in done]
+            if skipped:
+                print(paint(f"Skipped {len(skipped)} name(s) already in {args.output} or checked "
+                            f"in the last {args.skip_hours:g} hour(s).", Palette.GRAY))
+            if not valid:
+                print(paint("Nothing left to check.", Palette.GRAY))
+                return
+
+    discord = args.discord
+    if args.watch and not discord and os.environ.get("DISCORD_WEBHOOK_URL"):
+        try:
+            discord = discord_webhook(os.environ["DISCORD_WEBHOOK_URL"])
+        except argparse.ArgumentTypeError as exc:
+            print(paint(f"Warning: ignoring DISCORD_WEBHOOK_URL, it {exc}.", Palette.YELLOW))
+
     checker = UsernameChecker(
         threads=args.threads,
         delay=args.delay,
@@ -1392,10 +1632,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     if proxies and not args.no_proxy_check:
         checker.probe_proxies()
 
-    hits = load_existing_hits(args.output)
-    known = len(hits)
     if args.watch:
-        watch_names(checker, valid, max(args.every, 1.0), args.output, hits)
+        watch_names(checker, valid, args, hits, discord)
         return
     if interactive:
         results, elapsed = interactive_session(checker, args.output, hits, args.suggest)
@@ -1410,20 +1648,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         if args.suggest and not args.quiet:
             results += suggest_for_taken(checker, results)
         elapsed = time.monotonic() - start
-        save_hits(args.output, results, hits)
+        store_results(args.output, results, hits)
 
-    checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
-    for attr, export in (("json_out", lambda path: export_json(path, results, checked_at)),
-                         ("csv_out", lambda path: export_csv(path, results)),
-                         ("html_out", lambda path: export_html(path, results, checked_at))):
-        path = getattr(args, attr)
-        if path:
-            try:
-                export(path)
-            except OSError as exc:
-                print(paint(f"Error: couldn't write {path} ({exc})", Palette.RED))
-                setattr(args, attr, None)  # so the summary doesn't list it
-
+    write_exports(args, results)
     print_summary(args, results, elapsed, len(hits) - known, known)
 
 
